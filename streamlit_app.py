@@ -2,6 +2,19 @@
 
 Menjalankan:  streamlit run app.py
 """
+# --- Pasang otomatis paket yang belum ada (supaya cukup satu file, tanpa requirements.txt) ---
+import importlib
+import subprocess
+import sys
+
+for _mod, _pkg in (("numpy", "numpy"), ("pandas", "pandas"), ("scipy", "scipy"),
+                   ("plotly", "plotly"), ("openpyxl", "openpyxl")):
+    try:
+        importlib.import_module(_mod)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", _pkg])
+# ---------------------------------------------------------------------------------------------
+
 import datetime as dt
 import io
 import math
