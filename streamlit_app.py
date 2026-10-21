@@ -842,5 +842,3 @@ with tabs[6]:
         d3.download_button("⬇ Ringkasan hasil (CSV)", summ.to_csv(index=False), "hasil_fosfat.csv", "text/csv")
         with st.expander("Pratinjau laporan"):
             embed_html(html, 700)
- 
-Claude finished the response
