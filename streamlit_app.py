@@ -127,7 +127,7 @@ def fit_calibration(df: pd.DataFrame) -> CalFit:
 
 
 # ======================================================================
-# BAGIAN 2 — SKEMA 3D INTERAKTIF (CSS & HTML SIMULASI 3D UV-1800)
+# BAGIAN 2 — SKEMA 3D INTERAKTIF
 # ======================================================================
 
 _HTML_3D = r"""
@@ -179,7 +179,7 @@ input[type=range] { width: 100%; accent-color: var(--acc); }
     
     <div class="controls-grid">
       <div class="control-card">
-        <label>Panjang Gelombang ($\lambda$): <span id="lval" style="color:#fff;">880</span> nm</label>
+        <label>Panjang Gelombang (&lambda;): <span id="lval" style="color:#fff;">880</span> nm</label>
         <input id="lam" type="range" min="190" max="1100" value="880">
       </div>
       <div class="control-card">
@@ -203,7 +203,6 @@ const rA = document.getElementById('rA');
 function updateSim() {
   lval.innerText = lam.value;
   cval.innerText = (+conc.value).toFixed(2);
-  // Asumsi slope ~0.69 pada 880nm
   let slope = 0.69;
   let absorbance = slope * (+conc.value) * Math.exp(-Math.pow((+lam.value - 880)/80, 2));
   rA.innerText = absorbance.toFixed(3);
@@ -225,7 +224,6 @@ st.set_page_config(page_title="UV-1800 | Analisis Fosfat Air & Pupuk", page_icon
 st.title("🧪 Analisis Kadar Fosfat ($PO_4-P$) Air & Pupuk — Shimadzu UV-1800")
 st.caption("Modul Interaktif 3D • Input Data Mandiri • Kurva Kalibrasi • Perhitungan Sampel Air & Pupuk")
 
-# Inisialisasi State Data Sampel & Standar Sendiri
 if "std_data" not in st.session_state:
     st.session_state["std_data"] = pd.DataFrame({
         CONC_COL: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
@@ -310,13 +308,12 @@ with tabs[4]:
             vals = pd.to_numeric(row[abs_cols_present], errors="coerce").dropna().to_numpy()
             if len(vals) > 0:
                 y_mean = vals.mean()
-                # x0 = (y - a) / b (mg/L P)
                 x0 = (y_mean - fit.a) / fit.b
                 v_aliquot = float(row.get("V aliquot (mL)", 1.0))
                 v_akhir = float(row.get("V akhir (mL)", 1.0))
                 faktor_pengenceran = v_akhir / v_aliquot if v_aliquot > 0 else 1.0
                 kadar_p = x0 * faktor_pengenceran
-                kadar_po4 = kadar_p * 3.0661 # Konversi P ke PO4
+                kadar_po4 = kadar_p * 3.0661  # Konversi P ke PO4
                 water_results.append({
                     "Nama Sampel": row.get("Nama Sampel Air", f"Sampel {idx+1}"),
                     "Abs Rata-rata": round(y_mean, 4),
@@ -334,4 +331,31 @@ with tabs[4]:
         fert_results = []
         for idx, row in fert_df.iterrows():
             abs_cols_present = [c for c in ABS_COLS if c in row.index]
-            vals = pd.to_numeric(row[abs_cols_present], errors="coerce").dropna().to_
+            vals = pd.to_numeric(row[abs_cols_present], errors="coerce").dropna().to_numpy()
+            if len(vals) > 0:
+                y_mean = vals.mean()
+                x0 = (y_mean - fit.a) / fit.b
+                massa = float(row.get("Massa Timbang (g)", 1.0))
+                v_ekstrak = float(row.get("V Ekstraksi (mL)", 250.0))
+                v_aliquot = float(row.get("V Aliquot Pengenceran (mL)", 10.0))
+                v_akhir = float(row.get("V Akhir Pengenceran (mL)", 50.0))
+                
+                if massa > 0 and v_aliquot > 0:
+                    mg_p_total = x0 * (v_ekstrak / 1000.0) * (v_akhir / v_aliquot) * 1000.0
+                    g_p_total = mg_p_total / 1000.0
+                    persen_p = (g_p_total / massa) * 100.0
+                    persen_p2o5 = persen_p * 2.2915  # Konversi P ke P2O5
+                    
+                    fert_results.append({
+                        "Nama Pupuk": row.get("Nama Sampel Pupuk", f"Pupuk {idx+1}"),
+                        "Abs Rata-rata": round(y_mean, 4),
+                        "Kadar P (%)": round(persen_p, 2),
+                        "Kadar P₂O₅ (%)": round(persen_p2o5, 2)
+                    })
+        if fert_results:
+            st.dataframe(pd.DataFrame(fert_results), use_container_width=True)
+        else:
+            st.info("Belum ada data sampel pupuk yang valid.")
+
+    except Exception as e:
+        st.error(f"Gagal menghitung hasil: {e}")
