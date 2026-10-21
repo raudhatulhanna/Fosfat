@@ -2,29 +2,16 @@
 
 Menjalankan:  streamlit run app.py
 """
-# --- Pasang otomatis paket yang belum ada (supaya cukup satu file, tanpa requirements.txt) ---
-import importlib
-import subprocess
-import sys
-
-for _mod, _pkg in (("numpy", "numpy"), ("pandas", "pandas"), ("scipy", "scipy"),
-                   ("plotly", "plotly"), ("openpyxl", "openpyxl")):
-    try:
-        importlib.import_module(_mod)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", _pkg])
-# ---------------------------------------------------------------------------------------------
-
 import datetime as dt
 import io
 import math
+import zipfile
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
-from scipy import stats
 
 
 from dataclasses import dataclass
@@ -32,6 +19,66 @@ from dataclasses import dataclass
 # ======================================================================
 # BAGIAN 1 — PERHITUNGAN
 # ======================================================================
+
+# ---- Distribusi t-Student tanpa scipy ----------------------------------------------------------
+def _betacf(a, b, x):
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < 1e-14:
+            break
+    return h
+
+
+def _betainc(a, b, x):
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    bt = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1 - x))
+    if x < (a + 1) / (a + b + 2):
+        return bt * _betacf(a, b, x) / a
+    return 1 - bt * _betacf(b, a, 1 - x) / b
+
+
+def _t_cdf(t, df):
+    p = 0.5 * _betainc(df / 2.0, 0.5, df / (df + t * t))
+    return 1 - p if t > 0 else p
+
+
+def t_ppf(p, df):
+    """Kuantil t-Student (p > 0,5) dengan metode bagi-dua."""
+    df = max(float(df), 1.0)
+    lo, hi = 0.0, 1e4
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if _t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def norm_ppf(p):
+    return NormalDist().inv_cdf(p)
+
 
 
 CONC_COL = "Konsentrasi (mg/L P)"
@@ -123,7 +170,7 @@ def fit_calibration(df: pd.DataFrame) -> CalFit:
 
 
 def conf_band(fit: CalFit, xg: np.ndarray, conf: float):
-    t = stats.t.ppf(1 - (1 - conf) / 2, fit.dof)
+    t = t_ppf(1 - (1 - conf) / 2, fit.dof)
     yh = fit.a + fit.b * xg
     h = t * fit.sy * np.sqrt(1 / fit.n + (xg - fit.xbar) ** 2 / fit.sxx)
     return yh, yh - h, yh + h
@@ -223,8 +270,8 @@ def evaluate_sample(row: pd.Series, fit: CalFit, cfg: dict) -> dict:
     if cfg["k_mode"] == "k = 2":
         k = 2.0
     else:
-        k = float(stats.t.ppf(1 - (1 - conf) / 2, veff)) if np.isfinite(veff) and veff < 1e4 else float(
-            stats.norm.ppf(1 - (1 - conf) / 2))
+        k = float(t_ppf(1 - (1 - conf) / 2, veff)) if np.isfinite(veff) and veff < 1e4 else float(
+            norm_ppf(1 - (1 - conf) / 2))
     U = k * u_c
     return dict(name=row.get("Nama sampel", ""), y=y, m=m, y0=y0, sd_rep=sd_rep,
                 rsd_rep=(sd_rep / y0 * 100) if m > 1 and y0 else float("nan"),
@@ -388,7 +435,7 @@ def schematic_html(slope: float = 0.69, lam0: int = 880) -> str:
 import inspect
 
 # Kompatibel dengan Streamlit lama (use_container_width) dan baru (width="stretch")
-W = ({"width": "stretch"} if "width" in inspect.signature(st.plotly_chart).parameters
+W = ({"width": "stretch"} if "width" in inspect.signature(st.dataframe).parameters
      else {"use_container_width": True})
 
 
@@ -397,6 +444,17 @@ def embed_html(html: str, height: int):
         st.iframe(html, height=height)
     else:
         components.html(html, height=height, scrolling=True)
+
+
+
+def vega(spec: dict, height: int = 380):
+    full = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json", "width": "container",
+            "height": height, **spec}
+    st.vega_lite_chart(full, **W)
+
+
+def X(title, **kw):
+    return {"field": "x", "type": "quantitative", "title": title, "scale": {"zero": False}, **kw}
 
 
 st.set_page_config(page_title="UV-1800 | Penetapan Fosfat", page_icon="🧪", layout="wide")
@@ -548,14 +606,20 @@ with tabs[2]:
         if spec is not None and len(spec):
             i = int(spec["A"].idxmax())
             lmax, amax = float(spec.loc[i, "λ (nm)"]), float(spec.loc[i, "A"])
-            fg = go.Figure(go.Scatter(x=spec["λ (nm)"], y=spec["A"], mode="lines", name="Spektrum"))
-            fg.add_vline(x=lmax, line_dash="dash", line_color="#d62828",
-                         annotation_text=f"λmaks = {lmax:.0f} nm")
-            fg.add_vline(x=lam, line_dash="dot", line_color="#38bdf8", annotation_text=f"λ analisis {lam} nm",
-                         annotation_position="bottom right")
-            fg.update_layout(xaxis_title="Panjang gelombang (nm)", yaxis_title="Absorbansi (A)",
-                             height=420, margin=dict(t=30))
-            st.plotly_chart(fg, **W)
+            recs = [{"x": float(u), "y": float(v)} for u, v in zip(spec["λ (nm)"], spec["A"])]
+            vega({"layer": [
+                {"data": {"values": recs}, "mark": {"type": "line", "color": "#38bdf8"},
+                 "encoding": {"x": X("Panjang gelombang (nm)"),
+                              "y": {"field": "y", "type": "quantitative", "title": "Absorbansi (A)"}}},
+                {"data": {"values": [{"x": lmax, "t": f"λmaks = {lmax:.0f} nm"}]},
+                 "mark": {"type": "rule", "color": "#d62828", "strokeDash": [5, 4]},
+                 "encoding": {"x": X("")}},
+                {"data": {"values": [{"x": lmax, "t": f"λmaks = {lmax:.0f} nm"}]},
+                 "mark": {"type": "text", "align": "left", "dx": 5, "dy": 8, "color": "#d62828"},
+                 "encoding": {"x": X(""), "y": {"value": 8}, "text": {"field": "t"}}},
+                {"data": {"values": [{"x": float(lam)}]},
+                 "mark": {"type": "rule", "color": "#38bdf8", "strokeDash": [2, 3]},
+                 "encoding": {"x": X("")}}]}, 420)
             st.metric("λ maksimum terdeteksi", f"{lmax:.0f} nm", f"A = {amax:.3f}")
             if abs(lmax - lam) > 10:
                 st.warning("λ analisis berbeda >10 nm dari λmaks spektrum; pertimbangkan menyesuaikan.")
@@ -586,43 +650,57 @@ with tabs[3]:
             st.success(f"R² = {fit.r2:.5f} ≥ {r2_min:.3f} — linearitas memenuhi kriteria.")
         else:
             st.error(f"R² = {fit.r2:.5f} < {r2_min:.3f} — linearitas tidak memenuhi kriteria.")
-        t_a = stats.t.ppf(1 - (1 - conf) / 2, fit.dof)
+        t_a = t_ppf(1 - (1 - conf) / 2, fit.dof)
         if abs(fit.a) > t_a * fit.se_a:
             st.warning("Intersep berbeda nyata dari nol (uji-t): periksa kontaminasi blanko / koreksi blanko.")
 
         xg = np.linspace(min(0, fit.x.min()), fit.x.max() * 1.05, 100)
         yh, lo, hi = conf_band(fit, xg, conf)
         cA, cB = st.columns(2)
-        fg = go.Figure()
-        fg.add_trace(go.Scatter(x=np.r_[xg, xg[::-1]], y=np.r_[hi, lo[::-1]], fill="toself",
-                                fillcolor="rgba(56,189,248,.18)", line=dict(width=0),
-                                name=f"Pita kepercayaan {conf:.0%}", hoverinfo="skip"))
-        fg.add_trace(go.Scatter(x=xg, y=yh, mode="lines", name="Regresi", line=dict(color="#38bdf8")))
-        fg.add_trace(go.Scatter(x=fit.x, y=fit.y, mode="markers", name="Data standar",
-                                marker=dict(color="#f97316", size=8)))
         sm = st.session_state["smp"]
         pts = []
         for _, r in sm.iterrows():
             try:
                 ev = evaluate_sample(r, fit, dict(std_rows=[], glass_class=glass_class, dist=dist, conf=conf,
                                                   k_mode=k_mode))
-                pts.append((ev["x0"], ev["y0"], ev["name"]))
+                pts.append({"x": float(ev["x0"]), "y": float(ev["y0"]), "t": str(ev["name"])})
             except Exception:  # noqa: BLE001
                 pass
-        if pts:
-            fg.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers+text",
-                                    text=[str(p[2]) for p in pts], textposition="top left",
-                                    marker=dict(symbol="diamond", size=11, color="#7ee787"), name="Sampel"))
         sgn = "+" if fit.a >= 0 else "−"
-        fg.update_layout(title=f"A = {fit.b:.5f}·C {sgn} {abs(fit.a):.5f}   (R² = {fit.r2:.5f})",
-                         xaxis_title="C (mg/L P)", yaxis_title="Absorbansi", height=420, margin=dict(t=50))
-        cA.plotly_chart(fg, **W)
-        fr = go.Figure(go.Scatter(x=fit.x, y=fit.resid, mode="markers", marker=dict(color="#f97316", size=8)))
-        fr.add_hline(y=0, line_dash="dash")
-        fr.add_hrect(y0=-2 * fit.sy, y1=2 * fit.sy, fillcolor="rgba(120,120,120,.12)", line_width=0)
-        fr.update_layout(title="Plot residual (area abu-abu = ±2·s(y/x))", xaxis_title="C (mg/L P)",
-                         yaxis_title="Residual (A)", height=420, margin=dict(t=50))
-        cB.plotly_chart(fr, **W)
+        yq = {"field": "y", "type": "quantitative", "title": "Absorbansi"}
+        layers = [
+            {"data": {"values": [{"x": float(u), "lo": float(l_), "hi": float(h_)} for u, l_, h_ in zip(xg, lo, hi)]},
+             "mark": {"type": "area", "color": "#38bdf8", "opacity": 0.2},
+             "encoding": {"x": X("C (mg/L P)", scale={"zero": True}),
+                          "y": {"field": "lo", "type": "quantitative", "title": "Absorbansi"}, "y2": {"field": "hi"}}},
+            {"data": {"values": [{"x": float(u), "y": float(v)} for u, v in zip(xg, yh)]},
+             "mark": {"type": "line", "color": "#38bdf8"}, "encoding": {"x": X("C (mg/L P)"), "y": yq}},
+            {"data": {"values": [{"x": float(u), "y": float(v)} for u, v in zip(fit.x, fit.y)]},
+             "mark": {"type": "point", "filled": True, "color": "#f97316", "size": 60},
+             "encoding": {"x": X("C (mg/L P)"), "y": yq}}]
+        if pts:
+            layers += [
+                {"data": {"values": pts}, "mark": {"type": "point", "shape": "diamond", "filled": True,
+                                                    "color": "#7ee787", "size": 140},
+                 "encoding": {"x": X("C (mg/L P)"), "y": yq}},
+                {"data": {"values": pts}, "mark": {"type": "text", "align": "left", "dx": 8, "dy": -8,
+                                                    "color": "#7ee787"},
+                 "encoding": {"x": X("C (mg/L P)"), "y": yq, "text": {"field": "t"}}}]
+        with cA:
+            st.markdown(f"**A = {fit.b:.5f}·C {sgn} {abs(fit.a):.5f}**  (R² = {fit.r2:.5f}) — "
+                        f"oranye: standar, hijau: sampel, area biru: pita kepercayaan {conf:.0%}")
+            vega({"layer": layers}, 380)
+        rr = [{"x": float(u), "y": float(v)} for u, v in zip(fit.x, fit.resid)]
+        rule = lambda v, d: {"data": {"values": [{"y": float(v)}]},
+                             "mark": {"type": "rule", "strokeDash": d, "color": "#888"},
+                             "encoding": {"y": {"field": "y", "type": "quantitative"}}}
+        with cB:
+            st.markdown("**Plot residual** (garis putus-putus = ±2·s(y/x))")
+            vega({"layer": [
+                {"data": {"values": rr}, "mark": {"type": "point", "filled": True, "color": "#f97316", "size": 60},
+                 "encoding": {"x": X("C (mg/L P)"),
+                              "y": {"field": "y", "type": "quantitative", "title": "Residual (A)"}}},
+                rule(0, [1, 0]), rule(2 * fit.sy, [4, 4]), rule(-2 * fit.sy, [4, 4])]}, 380)
         with st.expander("Rekap per level & rumus"):
             st.dataframe(fit.levels, **W, hide_index=True)
             st.latex(r"b=\frac{\sum (x_i-\bar x)(y_i-\bar y)}{S_{xx}},\quad a=\bar y-b\bar x,\quad "
@@ -655,7 +733,7 @@ with tabs[4]:
         rm, rs = rv.mean(), rv.std(ddof=1)
         u_r = rs / math.sqrt(len(rv)) / rm
         t_r = abs(1 - rm) / (rs / math.sqrt(len(rv))) if rs > 0 else np.inf
-        t_c = stats.t.ppf(0.975, len(rv) - 1)
+        t_c = t_ppf(0.975, len(rv) - 1)
         sig = t_r > t_c
         rec_cfg = dict(rec_mean=rm, rec_u_rel=u_r, rec_dof=len(rv) - 1, rec_correct=rec_corr)
         ok_rec = rec_lo <= rm * 100 <= rec_hi
@@ -759,10 +837,15 @@ with tabs[5]:
         show["dof"] = show["dof"].map(lambda v: "∞" if not np.isfinite(v) else f"{v:.0f}")
         st.dataframe(show, **W, hide_index=True)
         bs = b.sort_values("Kontribusi (%)")
-        fb = go.Figure(go.Bar(x=bs["Kontribusi (%)"], y=bs["Sumber"], orientation="h", marker_color="#38bdf8"))
-        fb.update_layout(title="Kontribusi terhadap ketidakpastian gabungan (%)", height=120 + 38 * len(bs),
-                         margin=dict(l=10, t=40), xaxis_title="% dari u_c²")
-        st.plotly_chart(fb, **W)
+        st.markdown("**Kontribusi terhadap ketidakpastian gabungan (% dari u_c²)**")
+        vega({"layer": [{
+            "data": {"values": [{"s": str(r_["Sumber"]), "c": float(r_["Kontribusi (%)"])}
+                                for _, r_ in bs.iterrows()]},
+            "mark": {"type": "bar", "color": "#38bdf8"},
+            "encoding": {"y": {"field": "s", "type": "nominal", "sort": "-x", "title": None,
+                               "axis": {"labelLimit": 420}},
+                         "x": {"field": "c", "type": "quantitative", "title": "%"}}}]},
+             60 + 34 * len(bs))
         top = b.sort_values("Kontribusi (%)", ascending=False).iloc[0]
         st.info(f"Kontributor terbesar: **{top['Sumber']}** ({top['Kontribusi (%)']:.1f}%).")
         with st.expander("Model & rumus"):
@@ -835,27 +918,25 @@ with tabs[6]:
                     f"larutan standar (penimbangan, kemurnian, volumetri), pengenceran sampel"
                     f"{', recovery' if rec_cfg else ''}{', akurasi fotometrik' if photometric else ''}.")
         html = build_report_html(fit, results, cfg_text)
-        # Excel
-        bio = io.BytesIO()
-        with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-            pd.DataFrame({"Item": ["Instrumen", "No. seri", "λ (nm)", "Sel (cm)", "Analis", "Laboratorium",
-                                   "Tanggal", "Acuan metode", "Tingkat kepercayaan", "k"],
-                          "Nilai": ["Shimadzu UV-1800", sn, lam, path, analis, lab, str(tgl), sop, conf, k_mode]}
-                         ).to_excel(xw, sheet_name="Metadata", index=False)
-            st.session_state["std"].to_excel(xw, sheet_name="Data_standar", index=False)
-            pd.DataFrame({"Parameter": ["b", "a", "R2", "s(y/x)", "n", "LOD", "LOQ"],
-                          "Nilai": [fit.b, fit.a, fit.r2, fit.sy, fit.n, fit.lod, fit.loq]}
-                         ).to_excel(xw, sheet_name="Regresi", index=False)
-            summ = pd.DataFrame([{"Sampel": n, "A rata-rata": e["y0"], "C larutan (mg/L P)": e["x0"], "DF": e["df"],
-                                  "Kadar P (mg/L)": e["c_p"], "u_c": e["u_c"], "k": e["k"], "U": e["U"],
-                                  "Kadar PO4 (mg/L)": e["c_po4"]} for n, e in results.items()])
-            summ.to_excel(xw, sheet_name="Hasil", index=False)
-            for n, e in results.items():
-                e["budget"].replace([np.inf], np.nan).to_excel(xw, sheet_name=f"Anggaran_{n}"[:31], index=False)
+        meta = pd.DataFrame({"Item": ["Instrumen", "No. seri", "λ (nm)", "Sel (cm)", "Analis", "Laboratorium",
+                                      "Tanggal", "Acuan metode", "Tingkat kepercayaan", "k"],
+                             "Nilai": ["Shimadzu UV-1800", sn, lam, path, analis, lab, str(tgl), sop, conf, k_mode]})
+        reg = pd.DataFrame({"Parameter": ["b", "a", "R2", "s(y/x)", "n", "LOD", "LOQ"],
+                            "Nilai": [fit.b, fit.a, fit.r2, fit.sy, fit.n, fit.lod, fit.loq]})
+        summ = pd.DataFrame([{"Sampel": n, "A rata-rata": e["y0"], "C larutan (mg/L P)": e["x0"], "DF": e["df"],
+                              "Kadar P (mg/L)": e["c_p"], "u_c": e["u_c"], "k": e["k"], "U": e["U"],
+                              "Kadar PO4 (mg/L)": e["c_po4"]} for n, e in results.items()])
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname, d_ in (("metadata.csv", meta), ("data_standar.csv", st.session_state["std"]),
+                              ("regresi.csv", reg), ("hasil.csv", summ)):
+                zf.writestr(fname, d_.to_csv(index=False))
+            for i_, (n, e) in enumerate(results.items(), 1):
+                zf.writestr(f"anggaran_ketidakpastian_{i_}.csv", e["budget"].to_csv(index=False))
         d1, d2, d3 = st.columns(3)
         d1.download_button("⬇ Laporan (HTML, bisa dicetak ke PDF)", html, "laporan_fosfat_uv1800.html", "text/html")
-        d2.download_button("⬇ Data & perhitungan (Excel)", bio.getvalue(), "fosfat_uv1800.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        d2.download_button("⬇ Semua data & anggaran (ZIP berisi CSV)", zbuf.getvalue(), "fosfat_uv1800.zip",
+                           "application/zip")
         d3.download_button("⬇ Ringkasan hasil (CSV)", summ.to_csv(index=False), "hasil_fosfat.csv", "text/csv")
         with st.expander("Pratinjau laporan"):
             embed_html(html, 700)
