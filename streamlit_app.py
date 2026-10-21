@@ -1,29 +1,29 @@
 """Streamlit: Penetapan Kadar Fosfat dengan Spektrofotometer UV-Vis Shimadzu UV-1800.
-
+ 
 Menjalankan:  streamlit run app.py
 """
 import datetime as dt
 import io
 import math
-
+ 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy import stats
-
-
+ 
+ 
 from dataclasses import dataclass
-
+ 
 # ======================================================================
 # BAGIAN 1 — PERHITUNGAN
 # ======================================================================
-
-
+ 
+ 
 CONC_COL = "Konsentrasi (mg/L P)"
 ABS_COLS = ["Abs 1", "Abs 2", "Abs 3", "Abs 4", "Abs 5"]
-
+ 
 # Massa atom (g/mol) dan ketidakpastian (setengah lebar interval, distribusi persegi panjang)
 ATOMIC = {
     "K": (39.0983, 0.0001),
@@ -34,26 +34,26 @@ ATOMIC = {
 M_P = ATOMIC["P"][0]
 M_PO4 = M_P + 4 * ATOMIC["O"][0]
 P_TO_PO4 = M_PO4 / M_P  # 3.0661
-
+ 
 # Toleransi gelas volumetrik kelas A (ISO 1042 labu ukur, ISO 648 pipet volume), dalam mL
 FLASK_TOL = {5: 0.025, 10: 0.025, 25: 0.03, 50: 0.05, 100: 0.10, 200: 0.15,
              250: 0.15, 500: 0.25, 1000: 0.40, 2000: 0.60}
 PIPET_TOL = {1: 0.008, 2: 0.010, 5: 0.015, 10: 0.020, 20: 0.030, 25: 0.030,
              50: 0.050, 100: 0.080}
-
-
+ 
+ 
 def glass_tol(kind: str, volume: float, glass_class: str = "A") -> float:
     table = FLASK_TOL if kind == "flask" else PIPET_TOL
     keys = sorted(table)
     tol = float(np.interp(volume, keys, [table[k] for k in keys]))
     return tol * (2.0 if glass_class == "B" else 1.0)
-
-
+ 
+ 
 def u_from_tol(tol: float, dist: str) -> float:
     """Ketidakpastian baku dari toleransi (setengah lebar)."""
     return tol / math.sqrt(6) if dist == "Segitiga" else tol / math.sqrt(3)
-
-
+ 
+ 
 # --------------------------------------------------------------------------- kalibrasi
 @dataclass
 class CalFit:
@@ -75,16 +75,16 @@ class CalFit:
     loq: float
     resid: np.ndarray
     levels: pd.DataFrame
-
-
+ 
+ 
 def long_data(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     cols = [c for c in ABS_COLS if c in df.columns]
     d = df[[CONC_COL] + cols].apply(pd.to_numeric, errors="coerce")
     d = d.dropna(subset=[CONC_COL])
     m = d.melt(id_vars=CONC_COL, value_vars=cols).dropna()
     return m[CONC_COL].to_numpy(float), m["value"].to_numpy(float)
-
-
+ 
+ 
 def fit_calibration(df: pd.DataFrame) -> CalFit:
     x, y = long_data(df)
     n = len(x)
@@ -107,15 +107,15 @@ def fit_calibration(df: pd.DataFrame) -> CalFit:
           .rename(columns={"x": CONC_COL, "mean": "A rata-rata", "std": "SD", "count": "n"}))
     return CalFit(x, y, n, xbar, ybar, sxx, b, a, sy, math.sqrt(max(r2, 0)), r2,
                   se_b, se_a, dof, 3.3 * sy / b, 10 * sy / b, resid, lv)
-
-
+ 
+ 
 def conf_band(fit: CalFit, xg: np.ndarray, conf: float):
     t = stats.t.ppf(1 - (1 - conf) / 2, fit.dof)
     yh = fit.a + fit.b * xg
     h = t * fit.sy * np.sqrt(1 / fit.n + (xg - fit.xbar) ** 2 / fit.sxx)
     return yh, yh - h, yh + h
-
-
+ 
+ 
 # --------------------------------------------------------------------------- ketidakpastian
 def stock_relative_u(m_g, u_m_lin, u_m_rep, purity, purity_hw, v_ml, v_tol, dist):
     """Ketidakpastian relatif larutan stok KH2PO4 (mg/L sebagai P)."""
@@ -135,8 +135,8 @@ def stock_relative_u(m_g, u_m_lin, u_m_rep, purity, purity_hw, v_ml, v_tol, dist
     ]
     conc = m_g * 1000 * (purity / 100) * f_p / (v_ml / 1000)
     return rows, conc, f_p
-
-
+ 
+ 
 def sf_round(U: float, x: float, sig: int = 2):
     """Bulatkan U ke `sig` angka penting dan x ke desimal yang sama."""
     if not np.isfinite(U) or U <= 0:
@@ -144,13 +144,13 @@ def sf_round(U: float, x: float, sig: int = 2):
     exp = math.floor(math.log10(U))
     dec = max(0, sig - 1 - exp)
     return round(x, dec), round(U, dec), dec
-
-
+ 
+ 
 def sample_row_values(row: pd.Series) -> np.ndarray:
     vals = pd.to_numeric(row[[c for c in ABS_COLS if c in row.index]], errors="coerce")
     return vals.dropna().to_numpy(float)
-
-
+ 
+ 
 def evaluate_sample(row: pd.Series, fit: CalFit, cfg: dict) -> dict:
     """Hitung kadar dan anggaran ketidakpastian untuk satu sampel."""
     y = sample_row_values(row)
@@ -168,7 +168,7 @@ def evaluate_sample(row: pd.Series, fit: CalFit, cfg: dict) -> dict:
     rec = cfg.get("rec_mean")  # fraksi, mis. 1.0
     corr = cfg.get("rec_correct", False) and rec
     c_p = x0 * df_ / (rec if corr else 1.0)
-
+ 
     # --- komponen
     comps = []
     u_x0 = fit.sy / fit.b * math.sqrt(1 / m + 1 / fit.n + (y0 - fit.ybar) ** 2 / (fit.b ** 2 * fit.sxx))
@@ -196,14 +196,14 @@ def evaluate_sample(row: pd.Series, fit: CalFit, cfg: dict) -> dict:
         comps.append(dict(Sumber=f"Akurasi fotometrik UV-1800 (±{acc} Abs)", Tipe="B", Distribusi="Persegi panjang",
                           Satuan="mg/L", Nilai=ua / fit.b, u_rel=abs(ua / fit.b / x0) if x0 else np.nan,
                           dof=np.inf))
-
+ 
     bud = pd.DataFrame(comps)
     s2 = float((bud["u_rel"] ** 2).sum())
     u_c_rel = math.sqrt(s2)
     u_c = abs(c_p) * u_c_rel
     bud["u_i (mg/L P)"] = abs(c_p) * bud["u_rel"]
     bud["Kontribusi (%)"] = 100 * bud["u_rel"] ** 2 / s2
-
+ 
     terms = [(r.u_rel ** 4) / r.dof for r in bud.itertuples() if np.isfinite(r.dof)]
     veff = (u_c_rel ** 4) / sum(terms) if terms and sum(terms) > 0 else np.inf
     conf = cfg["conf"]
@@ -219,20 +219,20 @@ def evaluate_sample(row: pd.Series, fit: CalFit, cfg: dict) -> dict:
                 u_c=u_c, u_c_rel=u_c_rel, veff=veff, k=k, U=U, U_rel=U / abs(c_p) * 100 if c_p else np.nan,
                 budget=bud, in_range=bool(fit.x.min() <= x0 <= fit.x.max()),
                 above_loq=bool(x0 >= fit.loq))
-
-
+ 
+ 
 def mo_blue_shape(wl):
     """Bentuk spektrum ilustratif kompleks biru molibdenum (puncak ~880 nm, bahu ~710 nm)."""
     wl = np.asarray(wl, float)
     g = lambda m, s: np.exp(-((wl - m) / s) ** 2)
     norm = 1.0 + 0.55 * math.exp(-((880 - 710) / 45) ** 2)
     return (g(880, 60) + 0.55 * g(710, 45)) / norm
-
-
+ 
+ 
 # ======================================================================
 # BAGIAN 2 — SKEMA ALAT INTERAKTIF
 # ======================================================================
-
+ 
 _HTML = r"""
 <!doctype html><html><head><meta charset="utf-8">
 <style>
@@ -363,29 +363,29 @@ $('bTour').onclick=()=>{if(tour){stopTour();return}ti=0;$('bTour').textContent='
 update();
 </script></body></html>
 """
-
-
+ 
+ 
 def schematic_html(slope: float = 0.69, lam0: int = 880) -> str:
     return _HTML.replace("__B__", f"{slope:.5f}").replace("__L0__", str(int(lam0)))
-
-
+ 
+ 
 # ======================================================================
 # BAGIAN 3 — ANTARMUKA STREAMLIT
 # ======================================================================
 import inspect
-
+ 
 # Kompatibel dengan Streamlit lama (use_container_width) dan baru (width="stretch")
 W = ({"width": "stretch"} if "width" in inspect.signature(st.plotly_chart).parameters
      else {"use_container_width": True})
-
-
+ 
+ 
 def embed_html(html: str, height: int):
     if hasattr(st, "iframe"):
         st.iframe(html, height=height)
     else:
         components.html(html, height=height, scrolling=True)
-
-
+ 
+ 
 st.set_page_config(page_title="UV-1800 | Penetapan Fosfat", page_icon="🧪", layout="wide")
 st.markdown(
     """<style>
@@ -393,7 +393,7 @@ st.markdown(
     div[data-testid="stMetricValue"]{font-size:1.5rem}
     .hasil{background:#0f2a1f;border:1px solid #1f6f4a;border-radius:12px;padding:14px 18px;font-size:1.15rem}
     </style>""", unsafe_allow_html=True)
-
+ 
 # --------------------------------------------------------------------------- data contoh
 EX_STD = pd.DataFrame({
     CONC_COL: [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0],
@@ -410,11 +410,11 @@ EX_CHAIN = pd.DataFrame({
     "Tahap": ["Pengenceran antara: stok → 5 mg/L P"],
     "Pipet (mL)": [10.0], "Labu (mL)": [100.0],
     "Toleransi pipet (mL)": [0.020], "Toleransi labu (mL)": [0.10]})
-
+ 
 for k, v in (("std", EX_STD), ("smp", EX_SMP), ("chain", EX_CHAIN)):
     if k not in st.session_state:
         st.session_state[k] = v.copy()
-
+ 
 # --------------------------------------------------------------------------- sidebar
 with st.sidebar:
     st.title("🧪 UV-1800")
@@ -443,23 +443,23 @@ with st.sidebar:
             st.session_state[k] = v.copy()
         st.rerun()
     st.caption("Data contoh bersifat ilustrasi, bukan hasil pengukuran nyata. Ganti dengan data Anda.")
-
+ 
 st.title("Penetapan Kadar Fosfat — Spektrofotometer UV-Vis Shimadzu UV-1800")
 st.caption("Skema alat • Prosedur • Spektrum • Kalibrasi • Perhitungan • Ketidakpastian • Pelaporan")
-
+ 
 tabs = st.tabs(["1 · Skema alat", "2 · Prosedur", "3 · Spektrum & λmaks", "4 · Kalibrasi",
                 "5 · Perhitungan sampel", "6 · Ketidakpastian", "7 · Pelaporan"])
-
+ 
 # --------------------------------------------------------------------------- data editors (di tab 4 & 5) — hitung dulu
 def get_fit():
     try:
         return fit_calibration(st.session_state["std"]), None
     except Exception as e:  # noqa: BLE001
         return None, str(e)
-
-
+ 
+ 
 fit, fit_err = get_fit()
-
+ 
 # =========================================================================== 1. SKEMA
 with tabs[0]:
     st.subheader("Skema jalur cahaya UV-1800 (interaktif)")
@@ -474,7 +474,7 @@ with tabs[0]:
             "- Rentang λ: 190–1100 nm; lebar celah spektral 1 nm\n"
             "- Akurasi fotometrik (spesifikasi pabrik): ±0,002 A (0–0,5 A), ±0,004 A (0,5–1 A)\n"
             "- Perangkat lunak: UVProbe (mode Photometric / Spectrum / Quantitation)")
-
+ 
 # =========================================================================== 2. PROSEDUR
 with tabs[1]:
     st.subheader("Prosedur kerja (metode asam askorbat)")
@@ -505,7 +505,7 @@ with tabs[1]:
         done += ok
         c2.markdown(f"**{i}. {t}** — {d}")
     st.progress(done / len(steps), text=f"Progres: {done}/{len(steps)} langkah")
-
+ 
 # =========================================================================== 3. SPEKTRUM
 with tabs[2]:
     st.subheader("Spektrum serapan & penentuan λ maksimum")
@@ -549,7 +549,7 @@ with tabs[2]:
         else:
             st.info("Belum ada data spektrum.")
     st.caption("Spektrum simulasi hanya model ilustratif (puncak ±880 nm, bahu ±710 nm).")
-
+ 
 # =========================================================================== 4. KALIBRASI
 with tabs[3]:
     st.subheader("Data standar & kurva kalibrasi")
@@ -576,7 +576,7 @@ with tabs[3]:
         t_a = stats.t.ppf(1 - (1 - conf) / 2, fit.dof)
         if abs(fit.a) > t_a * fit.se_a:
             st.warning("Intersep berbeda nyata dari nol (uji-t): periksa kontaminasi blanko / koreksi blanko.")
-
+ 
         xg = np.linspace(min(0, fit.x.min()), fit.x.max() * 1.05, 100)
         yh, lo, hi = conf_band(fit, xg, conf)
         cA, cB = st.columns(2)
@@ -616,7 +616,7 @@ with tabs[3]:
                      r"s_{y/x}=\sqrt{\frac{\sum (y_i-\hat y_i)^2}{n-2}}")
             st.latex(r"LOD=\frac{3{,}3\,s_{y/x}}{b},\qquad LOQ=\frac{10\,s_{y/x}}{b}")
             st.caption(f"n = {fit.n} pembacaan, derajat kebebasan = {fit.dof}, Sxx = {fit.sxx:.5f}")
-
+ 
 # =========================================================================== 5. SAMPEL
 results = {}
 with tabs[4]:
@@ -652,7 +652,7 @@ with tabs[4]:
                  f"(t = {t_r:.2f}, t kritis = {t_c:.2f}).")
     photometric = st.checkbox("Sertakan akurasi fotometrik UV-1800 sebagai komponen tambahan", False,
                               help="Sebagian sudah terwakili oleh sebaran residual regresi; centang hanya bila ingin konservatif.")
-
+ 
     st.markdown("**Larutan standar** — untuk anggaran ketidakpastian")
     s1, s2, s3 = st.columns(3)
     m_g = s1.number_input("Massa KH₂PO₄ (g)", 0.0001, 10.0, 0.2195, 0.0001, format="%.4f")
@@ -665,7 +665,7 @@ with tabs[4]:
     st.caption("Tahap pengenceran bersama (stok → larutan antara) yang berlaku untuk seluruh standar:")
     st.session_state["chain"] = st.data_editor(st.session_state["chain"], num_rows="dynamic",
                                                **W, key="chain_ed")
-
+ 
     if fit is None:
         st.error("Lengkapi data kalibrasi terlebih dahulu.")
     else:
@@ -683,7 +683,7 @@ with tabs[4]:
                              u_from_tol(tf, dist) / r["Labu (mL)"], "B"))
         cfg = dict(std_rows=std_rows, glass_class=glass_class, dist=dist, conf=conf, k_mode=k_mode,
                    photometric=photometric, **rec_cfg)
-
+ 
         rows, errs = [], []
         for idx, r in st.session_state["smp"].iterrows():
             if pd.isna(r.get("Nama sampel")) or str(r.get("Nama sampel")).strip() == "":
@@ -715,7 +715,7 @@ with tabs[4]:
                      r"C_{PO_4}=C_P\times\frac{M_{PO_4}}{M_P}=C_P\times 3{,}066")
         st.caption(f"Larutan stok nominal terhitung = {c_stock:.2f} mg/L P (fraksi P dalam KH₂PO₄ = {f_p:.5f}). "
                    "Konsentrasi deret standar pada tab 4 diisi sesuai pembuatan sebenarnya.")
-
+ 
 # =========================================================================== 6. KETIDAKPASTIAN
 with tabs[5]:
     st.subheader("Estimasi ketidakpastian pengukuran")
@@ -758,7 +758,7 @@ with tabs[5]:
                 "- Galat acak penyiapan tiap standar terwakili sebaran residual regresi; hanya bagian bersama "
                 "(stok & pengenceran antara) ditambahkan terpisah.\n"
                 "- Rumus pembulatan: U ke 2 angka penting, hasil mengikuti desimal U.")
-
+ 
 # =========================================================================== 7. PELAPORAN
 def build_report_html(fit, results, cfg_text):
     parts = [f"<h1>Laporan Penetapan Kadar Fosfat (PO₄-P)</h1>",
@@ -788,8 +788,8 @@ def build_report_html(fit, results, cfg_text):
            "th,td{border:1px solid #bbb;padding:4px 8px;text-align:left}th{background:#eef}"
            "h1{border-bottom:3px solid #1b4fd8}h2{color:#1b4fd8}</style>")
     return f"<!doctype html><html><head><meta charset='utf-8'><title>Laporan Fosfat</title>{css}</head><body>{''.join(parts)}</body></html>"
-
-
+ 
+ 
 with tabs[6]:
     st.subheader("Pelaporan")
     if fit is None or not results:
@@ -813,7 +813,7 @@ with tabs[6]:
         st.dataframe(pd.DataFrame([{"Parameter": a, "Hasil": b, "Status": "✅ Lulus" if c else "❌ Perlu ditinjau",
                                     "Kriteria": d} for a, b, c, d in qc]),
                      **W, hide_index=True)
-
+ 
         cfg_text = (f"Ketidakpastian diperluas U = k·u_c; k dari {k_mode}. Komponen: kurva kalibrasi (regresi), "
                     f"larutan standar (penimbangan, kemurnian, volumetri), pengenceran sampel"
                     f"{', recovery' if rec_cfg else ''}{', akurasi fotometrik' if photometric else ''}.")
@@ -842,3 +842,5 @@ with tabs[6]:
         d3.download_button("⬇ Ringkasan hasil (CSV)", summ.to_csv(index=False), "hasil_fosfat.csv", "text/csv")
         with st.expander("Pratinjau laporan"):
             embed_html(html, 700)
+ 
+Claude finished the response
